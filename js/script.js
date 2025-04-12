@@ -18,11 +18,23 @@ document.addEventListener('DOMContentLoaded', function() {
 
     const routineItemsContainer = document.getElementById('routine-items');
     const activityLogsContainer = document.getElementById('activity-logs');
-    const exportBtn = document.getElementById('export-btn');
+    const exportJsonBtn = document.getElementById('export-json-btn');
+    const exportCsvBtn = document.getElementById('export-csv-btn');
     const clearBtn = document.getElementById('clear-btn');
 
     // Carrega logs do localStorage
     let activityLogs = JSON.parse(localStorage.getItem('activityLogs')) || [];
+    let activeTimers = JSON.parse(localStorage.getItem('activeTimers')) || {};
+    let timerIntervals = {};
+
+    // Inicializa os timers ativos
+    function initializeTimers() {
+        for (const index in activeTimers) {
+            if (activeTimers.hasOwnProperty(index)) {
+                startTimerVisual(index, activeTimers[index].startTime);
+            }
+        }
+    }
 
     // Renderiza a rotina
     function renderRoutine() {
@@ -30,8 +42,12 @@ document.addEventListener('DOMContentLoaded', function() {
         
         routineData.forEach((item, index) => {
             const routineItem = document.createElement('div');
-            routineItem.className = 'routine-item';
+            routineItem.className = `routine-item ${activeTimers[index] ? 'active' : ''}`;
             routineItem.dataset.index = index;
+            
+            const timerValue = activeTimers[index] 
+                ? formatTime(Math.floor((Date.now() - new Date(activeTimers[index].startTime).getTime()) / 1000))
+                : '00:00';
             
             routineItem.innerHTML = `
                 <div class="time-column">${item.time}</div>
@@ -41,15 +57,16 @@ document.addEventListener('DOMContentLoaded', function() {
                     <input type="text" class="comment-input" placeholder="Adicionar comentário..." data-index="${index}">
                 </div>
                 <div class="actions-column">
-                    <button class="action-btn start-btn" data-index="${index}">Iniciar</button>
-                    <button class="action-btn complete-btn" data-index="${index}">Concluir</button>
+                    <button class="action-btn start-btn" data-index="${index}" ${activeTimers[index] ? 'disabled' : ''}>Iniciar</button>
+                    <button class="action-btn complete-btn" data-index="${index}" ${!activeTimers[index] ? 'disabled' : ''}>Concluir</button>
                 </div>
+                <div class="timer-column" data-timer="${index}">${timerValue}</div>
             `;
             
             routineItemsContainer.appendChild(routineItem);
         });
 
-        // Adiciona event listeners aos botões
+        // Adiciona event listeners
         document.querySelectorAll('.start-btn').forEach(btn => {
             btn.addEventListener('click', startActivity);
         });
@@ -85,26 +102,44 @@ document.addEventListener('DOMContentLoaded', function() {
             logEntry.className = 'log-entry';
             
             const logTime = new Date(log.timestamp).toLocaleString('pt-BR');
-            const comment = log.comment ? `<span class="log-comment"> - ${log.comment}</span>` : '';
+            const comment = log.comment ? `<div class="log-comment">${log.comment}</div>` : '';
             
             logEntry.innerHTML = `
-                <span class="log-time">[${logTime}]</span> 
-                ${log.action}: ${log.block} (${log.time})${comment}
+                <span class="log-time">[${logTime}]</span>
+                <span class="log-action">${log.action}:</span>
+                <span class="log-block">${log.block}</span>
+                <span>(${log.time})</span>
+                ${comment}
             `;
             
             activityLogsContainer.appendChild(logEntry);
         });
     }
 
-    // Registra início de atividade
+    // Inicia uma atividade
     function startActivity(e) {
         const index = e.target.dataset.index;
         const item = routineData[index];
         const commentInput = document.querySelector(`.comment-input[data-index="${index}"]`);
         const comment = commentInput.value || null;
         
+        const startTime = new Date().toISOString();
+        
+        // Registra o timer ativo
+        activeTimers[index] = { startTime };
+        saveActiveTimers();
+        
+        // Atualiza a UI
+        document.querySelector(`.routine-item[data-index="${index}"]`).classList.add('active');
+        e.target.disabled = true;
+        document.querySelector(`.complete-btn[data-index="${index}"]`).disabled = false;
+        
+        // Inicia o timer visual
+        startTimerVisual(index, startTime);
+        
+        // Cria log de início
         const logEntry = {
-            timestamp: new Date().toISOString(),
+            timestamp: startTime,
             action: 'INÍCIO',
             time: item.time,
             block: item.block,
@@ -121,20 +156,34 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     }
 
-    // Registra conclusão de atividade
+    // Conclui uma atividade
     function completeActivity(e) {
         const index = e.target.dataset.index;
         const item = routineData[index];
         const commentInput = document.querySelector(`.comment-input[data-index="${index}"]`);
         const comment = commentInput.value || null;
         
+        const endTime = new Date().toISOString();
+        const startTime = new Date(activeTimers[index].startTime);
+        const duration = Math.floor((new Date(endTime) - startTime) / 1000);
+        
+        // Remove o timer ativo
+        clearTimer(index);
+        
+        // Atualiza a UI
+        document.querySelector(`.routine-item[data-index="${index}"]`).classList.remove('active');
+        e.target.disabled = true;
+        document.querySelector(`.start-btn[data-index="${index}"]`).disabled = false;
+        
+        // Cria log de conclusão
         const logEntry = {
-            timestamp: new Date().toISOString(),
+            timestamp: endTime,
             action: 'CONCLUÍDO',
             time: item.time,
             block: item.block,
             objective: item.objective,
-            comment: comment
+            comment: comment,
+            duration: duration
         };
         
         activityLogs.push(logEntry);
@@ -143,6 +192,55 @@ document.addEventListener('DOMContentLoaded', function() {
         
         if (comment) {
             commentInput.value = '';
+        }
+    }
+
+    // Inicia o timer visual
+    function startTimerVisual(index, startTime) {
+        const timerElement = document.querySelector(`.timer-column[data-timer="${index}"]`);
+        
+        // Limpa qualquer intervalo existente
+        if (timerIntervals[index]) {
+            clearInterval(timerIntervals[index]);
+        }
+        
+        // Atualiza imediatamente
+        updateTimerDisplay(index, startTime, timerElement);
+        
+        // Configura a atualização contínua
+        timerIntervals[index] = setInterval(() => {
+            updateTimerDisplay(index, startTime, timerElement);
+        }, 1000);
+    }
+
+    // Atualiza o display do timer
+    function updateTimerDisplay(index, startTime, timerElement) {
+        const elapsedSeconds = Math.floor((Date.now() - new Date(startTime).getTime()) / 1000);
+        timerElement.textContent = formatTime(elapsedSeconds);
+    }
+
+    // Formata o tempo (segundos para MM:SS)
+    function formatTime(totalSeconds) {
+        const minutes = Math.floor(totalSeconds / 60);
+        const seconds = totalSeconds % 60;
+        return `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+    }
+
+    // Limpa um timer
+    function clearTimer(index) {
+        if (timerIntervals[index]) {
+            clearInterval(timerIntervals[index]);
+            delete timerIntervals[index];
+        }
+        
+        if (activeTimers[index]) {
+            delete activeTimers[index];
+            saveActiveTimers();
+        }
+        
+        const timerElement = document.querySelector(`.timer-column[data-timer="${index}"]`);
+        if (timerElement) {
+            timerElement.textContent = '00:00';
         }
     }
 
@@ -171,8 +269,13 @@ document.addEventListener('DOMContentLoaded', function() {
         localStorage.setItem('activityLogs', JSON.stringify(activityLogs));
     }
 
-    // Exporta logs para arquivo JSON
-    function exportLogs() {
+    // Salva timers ativos no localStorage
+    function saveActiveTimers() {
+        localStorage.setItem('activeTimers', JSON.stringify(activeTimers));
+    }
+
+    // Exporta logs para JSON
+    function exportToJson() {
         const dataStr = JSON.stringify(activityLogs, null, 2);
         const dataUri = 'data:application/json;charset=utf-8,'+ encodeURIComponent(dataStr);
         
@@ -182,6 +285,40 @@ document.addEventListener('DOMContentLoaded', function() {
         linkElement.setAttribute('href', dataUri);
         linkElement.setAttribute('download', exportFileDefaultName);
         linkElement.click();
+    }
+
+    // Exporta logs para CSV
+    function exportToCsv() {
+        if (activityLogs.length === 0) {
+            alert('Nenhum dado para exportar!');
+            return;
+        }
+        
+        // Cabeçalhos do CSV
+        let csv = 'Data,Hora,Ação,Bloco,Período,Objetivo,Duração (segundos),Comentário\n';
+        
+        // Adiciona cada linha
+        activityLogs.forEach(log => {
+            const dateTime = new Date(log.timestamp);
+            const date = dateTime.toLocaleDateString('pt-BR');
+            const time = dateTime.toLocaleTimeString('pt-BR');
+            
+            const duration = log.duration || '';
+            const comment = log.comment ? `"${log.comment.replace(/"/g, '""')}"` : '';
+            
+            csv += `"${date}","${time}","${log.action}","${log.block}","${log.time}","${log.objective}",${duration},${comment}\n`;
+        });
+        
+        // Cria o arquivo
+        const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.setAttribute('href', url);
+        link.setAttribute('download', `logs-rotina-${new Date().toISOString().slice(0,10)}.csv`);
+        link.style.visibility = 'hidden';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
     }
 
     // Limpa todos os logs
@@ -194,10 +331,12 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     // Event listeners para botões de controle
-    exportBtn.addEventListener('click', exportLogs);
+    exportJsonBtn.addEventListener('click', exportToJson);
+    exportCsvBtn.addEventListener('click', exportToCsv);
     clearBtn.addEventListener('click', clearLogs);
 
     // Inicializa a aplicação
+    initializeTimers();
     renderRoutine();
     renderActivityLogs();
 });
